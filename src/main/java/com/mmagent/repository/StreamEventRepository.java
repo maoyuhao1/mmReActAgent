@@ -9,4 +9,6 @@ public interface StreamEventRepository extends ReactiveMongoRepository<StreamEve
     Flux<StreamEventDocument> findByConversationIdOrderBySequenceAsc(String conversationId);
 
     Flux<StreamEventDocument> findBySessionId(String sessionId);
+
+    Flux<StreamEventDocument> findTop100ByOrderByTimestampDesc();
 }

@@ -7,4 +7,8 @@ import reactor.core.publisher.Flux;
 public interface ConversationRepository extends ReactiveMongoRepository<ConversationDocument, String> {
 
     Flux<ConversationDocument> findBySessionIdOrderByTurnIndexAsc(String sessionId);
+
+    Flux<ConversationDocument> findByStatus(String status);
+
+    Flux<ConversationDocument> findAllByOrderByStartTimeDesc();
 }

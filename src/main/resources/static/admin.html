@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>mmReActAgent 运维控制台</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { background: #0f1117; color: #e2e8f0; font-family: 'Segoe UI', system-ui, sans-serif; }
+    .card { background: #1a1d27; border: 1px solid #2d3148; border-radius: 12px; }
+    .tab-btn { transition: all .2s; }
+    .tab-btn.active { background: #3b5bdb; color: #fff; }
+    .tab-btn:not(.active):hover { background: #2d3148; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 9999px; font-size: 11px; font-weight: 600; }
+    .badge-active   { background: #0d3320; color: #34d399; border: 1px solid #059669; }
+    .badge-closed   { background: #1e1e2e; color: #94a3b8; border: 1px solid #475569; }
+    .badge-done     { background: #0d2d4a; color: #60a5fa; border: 1px solid #2563eb; }
+    .badge-running  { background: #2d2000; color: #fbbf24; border: 1px solid #d97706; }
+    .badge-error    { background: #2d0d0d; color: #f87171; border: 1px solid #dc2626; }
+    .badge-tool_call    { background: #1a0d2d; color: #a78bfa; border: 1px solid #7c3aed; }
+    .badge-tool_result  { background: #0d1a2d; color: #38bdf8; border: 1px solid #0284c7; }
+    tr:hover td { background: #1e2235; }
+    td, th { padding: 10px 14px; }
+    th { font-size: 11px; font-weight: 600; letter-spacing: .05em; color: #94a3b8; text-transform: uppercase; }
+    .mono { font-family: 'Consolas', monospace; font-size: 12px; }
+    .stat-card { background: linear-gradient(135deg, #1a1d27, #212438); }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #1a1d27; }
+    ::-webkit-scrollbar-thumb { background: #3b4260; border-radius: 3px; }
+    .spinner { animation: spin 1s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .fade-in { animation: fadeIn .3s ease; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+    .detail-panel { background: #12141e; border: 1px solid #2d3148; border-radius: 8px; }
+    .event-line { border-left: 3px solid #3b4260; padding: 6px 12px; margin-bottom: 6px; border-radius: 0 6px 6px 0; background: #12141e; }
+    .event-tool_call   { border-left-color: #7c3aed; }
+    .event-tool_result { border-left-color: #0284c7; }
+    .event-error       { border-left-color: #dc2626; }
+  </style>
+</head>
+<body class="min-h-screen">
+
+<!-- Header -->
+<header class="border-b border-gray-800 px-6 py-4 flex items-center justify-between sticky top-0 z-10" style="background:#0f1117ee;backdrop-filter:blur(8px);">
+  <div class="flex items-center gap-3">
+    <div class="w-8 h-8 rounded-lg flex items-center justify-center" style="background:linear-gradient(135deg,#3b5bdb,#7c3aed)">
+      <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17H3a2 2 0 01-2-2V5a2 2 0 012-2h14a2 2 0 012 2v10a2 2 0 01-2 2h-2"/></svg>
+    </div>
+    <div>
+      <h1 class="text-base font-bold text-white">mmReActAgent</h1>
+      <p class="text-xs text-gray-500">运维控制台</p>
+    </div>
+  </div>
+  <div class="flex items-center gap-4">
+    <span id="last-refresh" class="text-xs text-gray-500"></span>
+    <label class="flex items-center gap-2 text-xs text-gray-400">
+      <input type="checkbox" id="auto-refresh" checked class="rounded" />
+      自动刷新(30s)
+    </label>
+    <button onclick="refreshAll()" class="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium" style="background:#1e2438;border:1px solid #3b4260">
+      <svg id="refresh-icon" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+      刷新
+    </button>
+  </div>
+</header>
+
+<!-- Stats Bar -->
+<div class="px-6 pt-5 pb-2">
+  <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3" id="stats-bar">
+    <div class="stat-card card p-4 col-span-1"><div class="text-2xl font-bold text-white" id="s-totalSessions">-</div><div class="text-xs text-gray-400 mt-1">总会话数</div></div>
+    <div class="stat-card card p-4 col-span-1"><div class="text-2xl font-bold text-emerald-400" id="s-activeSessions">-</div><div class="text-xs text-gray-400 mt-1">活跃会话</div></div>
+    <div class="stat-card card p-4 col-span-1"><div class="text-2xl font-bold text-slate-400" id="s-closedSessions">-</div><div class="text-xs text-gray-400 mt-1">已关闭</div></div>
+    <div class="stat-card card p-4 col-span-1"><div class="text-2xl font-bold text-blue-400" id="s-inMemory">-</div><div class="text-xs text-gray-400 mt-1">内存会话</div></div>
+    <div class="stat-card card p-4 col-span-1"><div class="text-2xl font-bold text-white" id="s-totalConversations">-</div><div class="text-xs text-gray-400 mt-1">总对话轮次</div></div>
+    <div class="stat-card card p-4 col-span-1"><div class="text-2xl font-bold text-blue-400" id="s-doneConversations">-</div><div class="text-xs text-gray-400 mt-1">已完成</div></div>
+    <div class="stat-card card p-4 col-span-1"><div class="text-2xl font-bold text-red-400" id="s-errorConversations">-</div><div class="text-xs text-gray-400 mt-1">出错</div></div>
+    <div class="stat-card card p-4 col-span-1"><div class="text-2xl font-bold text-purple-400" id="s-totalEvents">-</div><div class="text-xs text-gray-400 mt-1">事件总数</div></div>
+  </div>
+</div>
+
+<!-- Tabs -->
+<div class="px-6 mt-4 flex gap-2 border-b border-gray-800 pb-0">
+  <button class="tab-btn active px-4 py-2 rounded-t-lg text-sm font-medium" onclick="switchTab('sessions')">会话列表</button>
+  <button class="tab-btn px-4 py-2 rounded-t-lg text-sm font-medium" onclick="switchTab('conversations')">对话记录</button>
+  <button class="tab-btn px-4 py-2 rounded-t-lg text-sm font-medium" onclick="switchTab('events')">流式事件</button>
+  <button class="tab-btn px-4 py-2 rounded-t-lg text-sm font-medium" onclick="switchTab('health')">系统健康</button>
+</div>
+
+<!-- Main Content -->
+<div class="px-6 py-4">
+
+  <!-- Sessions Tab -->
+  <div id="tab-sessions" class="tab-content fade-in">
+    <div class="card overflow-hidden">
+      <div class="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
+        <span class="text-sm font-medium">所有会话 <span id="session-count" class="text-gray-500"></span></span>
+        <input type="text" id="session-search" placeholder="搜索会话ID…" oninput="filterSessions()" class="text-sm px-3 py-1.5 rounded-lg" style="background:#12141e;border:1px solid #2d3148;color:#e2e8f0;width:220px;outline:none"/>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead><tr style="border-bottom:1px solid #1e2235">
+            <th class="text-left">会话 ID</th>
+            <th class="text-left">状态</th>
+            <th class="text-right">消息数</th>
+            <th class="text-left">创建时间</th>
+            <th class="text-left">最后活跃</th>
+            <th class="text-center">操作</th>
+          </tr></thead>
+          <tbody id="sessions-tbody"><tr><td colspan="6" class="text-center text-gray-500 py-8">加载中…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Session detail panel -->
+    <div id="session-detail" class="mt-4 hidden fade-in">
+      <div class="detail-panel p-4">
+        <div class="flex items-center justify-between mb-3">
+          <h3 class="text-sm font-semibold text-gray-200">会话详情 — <span id="detail-session-id" class="mono text-blue-400"></span></h3>
+          <button onclick="closeSessionDetail()" class="text-gray-500 hover:text-gray-300 text-lg leading-none">&times;</button>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead><tr style="border-bottom:1px solid #1e2235">
+              <th class="text-left">轮次</th>
+              <th class="text-left">用户问题</th>
+              <th class="text-left">状态</th>
+              <th class="text-right">工具调用</th>
+              <th class="text-right">耗时(ms)</th>
+              <th class="text-left">时间</th>
+              <th class="text-center">详情</th>
+            </tr></thead>
+            <tbody id="detail-conversations-tbody"></tbody>
+          </table>
+        </div>
+        <!-- Conversation detail -->
+        <div id="conv-detail" class="mt-3 hidden">
+          <div class="p-3 rounded-lg" style="background:#0d0f17;border:1px solid #2d3148">
+            <div class="flex justify-between items-center mb-2">
+              <span class="text-xs font-semibold text-gray-400">对话详情</span>
+              <button onclick="closeConvDetail()" class="text-gray-500 hover:text-gray-300">&times;</button>
+            </div>
+            <div id="conv-detail-content"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Conversations Tab -->
+  <div id="tab-conversations" class="tab-content hidden fade-in">
+    <div class="card overflow-hidden">
+      <div class="px-4 py-3 border-b border-gray-800 flex items-center justify-between flex-wrap gap-2">
+        <span class="text-sm font-medium">最近 200 条对话记录</span>
+        <div class="flex gap-2">
+          <select id="conv-status-filter" onchange="filterConversations()" class="text-sm px-3 py-1.5 rounded-lg" style="background:#12141e;border:1px solid #2d3148;color:#e2e8f0;outline:none">
+            <option value="">全部状态</option>
+            <option value="done">已完成</option>
+            <option value="error">出错</option>
+            <option value="running">进行中</option>
+          </select>
+          <input type="text" id="conv-search" placeholder="搜索问题/会话ID…" oninput="filterConversations()" class="text-sm px-3 py-1.5 rounded-lg" style="background:#12141e;border:1px solid #2d3148;color:#e2e8f0;width:200px;outline:none"/>
+        </div>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead><tr style="border-bottom:1px solid #1e2235">
+            <th class="text-left">会话 ID</th>
+            <th class="text-right">轮次</th>
+            <th class="text-left">用户问题</th>
+            <th class="text-left">状态</th>
+            <th class="text-right">工具数</th>
+            <th class="text-right">耗时(ms)</th>
+            <th class="text-left">开始时间</th>
+            <th class="text-center">详情</th>
+          </tr></thead>
+          <tbody id="conversations-tbody"><tr><td colspan="8" class="text-center text-gray-500 py-8">加载中…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Conv inline detail -->
+    <div id="conv-inline-detail" class="mt-4 hidden fade-in">
+      <div class="detail-panel p-4">
+        <div class="flex items-center justify-between mb-3">
+          <h3 class="text-sm font-semibold text-gray-200">对话详情</h3>
+          <button onclick="document.getElementById('conv-inline-detail').classList.add('hidden')" class="text-gray-500 hover:text-gray-300 text-lg">&times;</button>
+        </div>
+        <div id="conv-inline-content"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Events Tab -->
+  <div id="tab-events" class="tab-content hidden fade-in">
+    <div class="card overflow-hidden">
+      <div class="px-4 py-3 border-b border-gray-800 flex items-center justify-between flex-wrap gap-2">
+        <span class="text-sm font-medium">最近 100 条流式事件</span>
+        <div class="flex gap-2">
+          <select id="event-type-filter" onchange="filterEvents()" class="text-sm px-3 py-1.5 rounded-lg" style="background:#12141e;border:1px solid #2d3148;color:#e2e8f0;outline:none">
+            <option value="">全部类型</option>
+            <option value="tool_call">tool_call</option>
+            <option value="tool_result">tool_result</option>
+            <option value="error">error</option>
+          </select>
+          <input type="text" id="event-search" placeholder="搜索内容/会话ID…" oninput="filterEvents()" class="text-sm px-3 py-1.5 rounded-lg" style="background:#12141e;border:1px solid #2d3148;color:#e2e8f0;width:200px;outline:none"/>
+        </div>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead><tr style="border-bottom:1px solid #1e2235">
+            <th class="text-left">时间</th>
+            <th class="text-left">类型</th>
+            <th class="text-left">会话 ID</th>
+            <th class="text-right">序号</th>
+            <th class="text-left">内容</th>
+          </tr></thead>
+          <tbody id="events-tbody"><tr><td colspan="5" class="text-center text-gray-500 py-8">加载中…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Health Tab -->
+  <div id="tab-health" class="tab-content hidden fade-in">
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div class="card p-5">
+        <h3 class="text-sm font-semibold text-gray-300 mb-4">系统状态</h3>
+        <div id="health-content" class="space-y-3">
+          <div class="text-gray-500 text-sm">加载中…</div>
+        </div>
+      </div>
+      <div class="card p-5">
+        <h3 class="text-sm font-semibold text-gray-300 mb-4">快速统计</h3>
+        <div id="health-stats" class="space-y-2 text-sm"></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const BASE = '';
+let allSessions = [], allConversations = [], allEvents = [];
+let refreshTimer = null;
+
+// ====== Tab 切换 ======
+function switchTab(name) {
+  document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
+  document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.remove('hidden');
+  event.target.classList.add('active');
+  if (name === 'conversations' && allConversations.length === 0) loadConversations();
+  if (name === 'events' && allEvents.length === 0) loadEvents();
+  if (name === 'health') loadHealth();
+}
+
+// ====== 刷新全部 ======
+async function refreshAll() {
+  const icon = document.getElementById('refresh-icon');
+  icon.classList.add('spinner');
+  try {
+    await Promise.all([loadStats(), loadSessions()]);
+    const activeTab = document.querySelector('.tab-btn.active')?.textContent;
+    if (activeTab?.includes('对话')) await loadConversations();
+    if (activeTab?.includes('事件')) await loadEvents();
+    if (activeTab?.includes('健康')) await loadHealth();
+    document.getElementById('last-refresh').textContent = '刷新于 ' + new Date().toLocaleTimeString('zh-CN');
+  } finally {
+    icon.classList.remove('spinner');
+  }
+}
+
+// ====== Stats ======
+async function loadStats() {
+  try {
+    const r = await fetch(`${BASE}/api/admin/stats`);
+    const d = await r.json();
+    document.getElementById('s-totalSessions').textContent = d.totalSessions ?? '-';
+    document.getElementById('s-activeSessions').textContent = d.activeSessions ?? '-';
+    document.getElementById('s-closedSessions').textContent = d.closedSessions ?? '-';
+    document.getElementById('s-inMemory').textContent = d.inMemorySessions ?? '-';
+    document.getElementById('s-totalConversations').textContent = d.totalConversations ?? '-';
+    document.getElementById('s-doneConversations').textContent = d.doneConversations ?? '-';
+    document.getElementById('s-errorConversations').textContent = d.errorConversations ?? '-';
+    document.getElementById('s-totalEvents').textContent = d.totalEvents ?? '-';
+    return d;
+  } catch (e) { console.error('stats error', e); }
+}
+
+// ====== Sessions ======
+async function loadSessions() {
+  try {
+    const r = await fetch(`${BASE}/api/admin/sessions`);
+    allSessions = await r.json();
+    document.getElementById('session-count').textContent = `(${allSessions.length})`;
+    renderSessions(allSessions);
+  } catch (e) { console.error('sessions error', e); }
+}
+
+function renderSessions(list) {
+  const tbody = document.getElementById('sessions-tbody');
+  if (!list.length) { tbody.innerHTML = '<tr><td colspan="6" class="text-center text-gray-500 py-8">暂无数据</td></tr>'; return; }
+  tbody.innerHTML = list.map(s => `
+    <tr style="border-bottom:1px solid #1a1d27;cursor:pointer" onclick="openSessionDetail('${s.id}')">
+      <td class="mono text-blue-400">${shortId(s.id)}</td>
+      <td><span class="badge badge-${s.status}">${s.status}</span></td>
+      <td class="text-right font-mono text-gray-300">${s.messageCount}</td>
+      <td class="text-gray-400">${fmtTime(s.createdAt)}</td>
+      <td class="text-gray-400">${fmtTime(s.lastActiveAt)}</td>
+      <td class="text-center">
+        <button onclick="event.stopPropagation();forceDelete('${s.id}')" class="text-xs px-2 py-1 rounded text-red-400 hover:text-red-300" style="background:#2d0d0d;border:1px solid #7f1d1d">销毁</button>
+      </td>
+    </tr>`).join('');
+}
+
+function filterSessions() {
+  const q = document.getElementById('session-search').value.toLowerCase();
+  renderSessions(q ? allSessions.filter(s => s.id.toLowerCase().includes(q)) : allSessions);
+}
+
+async function openSessionDetail(sessionId) {
+  document.getElementById('session-detail').classList.remove('hidden');
+  document.getElementById('detail-session-id').textContent = sessionId;
+  document.getElementById('detail-conversations-tbody').innerHTML = '<tr><td colspan="7" class="text-center text-gray-500 py-4">加载中…</td></tr>';
+  closeConvDetail();
+  try {
+    const r = await fetch(`${BASE}/api/admin/sessions/${sessionId}/conversations`);
+    const convs = await r.json();
+    renderDetailConversations(convs);
+  } catch (e) { console.error(e); }
+}
+
+function renderDetailConversations(convs) {
+  const tbody = document.getElementById('detail-conversations-tbody');
+  if (!convs.length) { tbody.innerHTML = '<tr><td colspan="7" class="text-center text-gray-500 py-4">暂无对话记录</td></tr>'; return; }
+  tbody.innerHTML = convs.map(c => `
+    <tr style="border-bottom:1px solid #1a1d27">
+      <td class="text-gray-400">#${c.turnIndex}</td>
+      <td class="max-w-xs truncate text-gray-200">${esc(c.userMessage || '')}</td>
+      <td><span class="badge badge-${c.status}">${c.status}</span></td>
+      <td class="text-right text-gray-400">${(c.toolCalls || []).length}</td>
+      <td class="text-right font-mono text-gray-400">${c.durationMs || '-'}</td>
+      <td class="text-gray-500">${fmtTime(c.startTime)}</td>
+      <td class="text-center"><button onclick="showConvDetail(${JSON.stringify(c).replace(/"/g,'&quot;')})" class="text-xs px-2 py-1 rounded text-blue-400" style="background:#0d2040;border:1px solid #1d4ed8">查看</button></td>
+    </tr>`).join('');
+}
+
+function showConvDetail(c) {
+  document.getElementById('conv-detail').classList.remove('hidden');
+  document.getElementById('conv-detail-content').innerHTML = buildConvDetailHtml(c);
+}
+function closeConvDetail() { document.getElementById('conv-detail').classList.add('hidden'); }
+function closeSessionDetail() { document.getElementById('session-detail').classList.add('hidden'); }
+
+// ====== Conversations ======
+async function loadConversations() {
+  try {
+    const r = await fetch(`${BASE}/api/admin/conversations`);
+    allConversations = await r.json();
+    filterConversations();
+  } catch (e) { console.error('conversations error', e); }
+}
+
+function filterConversations() {
+  const q = document.getElementById('conv-search').value.toLowerCase();
+  const st = document.getElementById('conv-status-filter').value;
+  let list = allConversations;
+  if (st) list = list.filter(c => c.status === st);
+  if (q) list = list.filter(c => (c.userMessage||'').toLowerCase().includes(q) || (c.sessionId||'').toLowerCase().includes(q));
+  renderConversations(list);
+}
+
+function renderConversations(list) {
+  const tbody = document.getElementById('conversations-tbody');
+  if (!list.length) { tbody.innerHTML = '<tr><td colspan="8" class="text-center text-gray-500 py-8">暂无数据</td></tr>'; return; }
+  tbody.innerHTML = list.map(c => `
+    <tr style="border-bottom:1px solid #1a1d27">
+      <td class="mono text-blue-400">${shortId(c.sessionId)}</td>
+      <td class="text-right text-gray-400">#${c.turnIndex}</td>
+      <td class="max-w-xs truncate text-gray-200">${esc(c.userMessage || '')}</td>
+      <td><span class="badge badge-${c.status}">${c.status}</span></td>
+      <td class="text-right text-gray-400">${(c.toolCalls||[]).length}</td>
+      <td class="text-right font-mono text-gray-400">${c.durationMs || '-'}</td>
+      <td class="text-gray-500">${fmtTime(c.startTime)}</td>
+      <td class="text-center"><button onclick="showConvInline(${JSON.stringify(c).replace(/"/g,'&quot;')})" class="text-xs px-2 py-1 rounded text-blue-400" style="background:#0d2040;border:1px solid #1d4ed8">查看</button></td>
+    </tr>`).join('');
+}
+
+function showConvInline(c) {
+  document.getElementById('conv-inline-detail').classList.remove('hidden');
+  document.getElementById('conv-inline-content').innerHTML = buildConvDetailHtml(c);
+  document.getElementById('conv-inline-detail').scrollIntoView({behavior:'smooth', block:'start'});
+}
+
+function buildConvDetailHtml(c) {
+  const tools = (c.toolCalls || []);
+  const toolsHtml = tools.length ? tools.map(t => `
+    <div class="p-3 rounded-lg mb-2" style="background:#0f1117;border:1px solid #2d3148">
+      <div class="flex items-center gap-2 mb-2">
+        <span class="badge badge-tool_call">${esc(t.toolName)}</span>
+        <span class="text-xs text-gray-500">${t.durationMs}ms</span>
+      </div>
+      <div class="text-xs text-gray-400 mb-1">参数：<span class="mono text-gray-300">${esc(t.inputArgs||'')}</span></div>
+      <div class="text-xs text-gray-400">结果：<span class="mono text-gray-300">${esc(t.result||'')}</span></div>
+    </div>`).join('') : '<div class="text-xs text-gray-500">无工具调用</div>';
+
+  return `
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div>
+        <div class="text-xs text-gray-500 mb-1">用户问题</div>
+        <div class="text-sm text-gray-200 p-3 rounded-lg" style="background:#0f1117;border:1px solid #2d3148;white-space:pre-wrap">${esc(c.userMessage||'')}</div>
+      </div>
+      <div>
+        <div class="text-xs text-gray-500 mb-1">AI 回复</div>
+        <div class="text-sm text-gray-200 p-3 rounded-lg max-h-48 overflow-y-auto" style="background:#0f1117;border:1px solid #2d3148;white-space:pre-wrap">${esc(c.aiReply||c.errorMsg||'(进行中…)')}</div>
+      </div>
+    </div>
+    <div class="mt-3">
+      <div class="text-xs text-gray-500 mb-2">工具调用记录 (${tools.length})</div>
+      ${toolsHtml}
+    </div>
+    <div class="mt-2 flex gap-4 text-xs text-gray-500">
+      <span>状态: <span class="badge badge-${c.status}">${c.status}</span></span>
+      <span>轮次: #${c.turnIndex}</span>
+      <span>耗时: ${c.durationMs||'-'}ms</span>
+      <span>开始: ${fmtTime(c.startTime)}</span>
+      <span>结束: ${fmtTime(c.endTime)}</span>
+    </div>`;
+}
+
+// ====== Events ======
+async function loadEvents() {
+  try {
+    const r = await fetch(`${BASE}/api/admin/events/recent`);
+    allEvents = await r.json();
+    filterEvents();
+  } catch (e) { console.error('events error', e); }
+}
+
+function filterEvents() {
+  const q = document.getElementById('event-search').value.toLowerCase();
+  const t = document.getElementById('event-type-filter').value;
+  let list = allEvents;
+  if (t) list = list.filter(e => e.eventType === t);
+  if (q) list = list.filter(e => (e.content||'').toLowerCase().includes(q) || (e.sessionId||'').toLowerCase().includes(q));
+  renderEvents(list);
+}
+
+function renderEvents(list) {
+  const tbody = document.getElementById('events-tbody');
+  if (!list.length) { tbody.innerHTML = '<tr><td colspan="5" class="text-center text-gray-500 py-8">暂无数据</td></tr>'; return; }
+  tbody.innerHTML = list.map(e => `
+    <tr style="border-bottom:1px solid #1a1d27">
+      <td class="text-gray-500 whitespace-nowrap">${fmtTime(e.timestamp)}</td>
+      <td><span class="badge badge-${e.eventType}">${e.eventType}</span></td>
+      <td class="mono text-blue-400">${shortId(e.sessionId)}</td>
+      <td class="text-right font-mono text-gray-500">#${e.sequence}</td>
+      <td class="text-gray-300 max-w-lg truncate" title="${esc(e.content||'')}">${esc(e.content||'')}</td>
+    </tr>`).join('');
+}
+
+// ====== Health ======
+async function loadHealth() {
+  try {
+    const [h, s] = await Promise.all([
+      fetch(`${BASE}/api/chat/health`).then(r=>r.json()),
+      loadStats()
+    ]);
+    const up = h.status === 'UP';
+    document.getElementById('health-content').innerHTML = `
+      <div class="flex items-center gap-3 p-4 rounded-lg" style="background:${up?'#0d3320':'#2d0d0d'};border:1px solid ${up?'#059669':'#dc2626'}">
+        <div class="w-3 h-3 rounded-full ${up?'bg-emerald-400':'bg-red-400'}"></div>
+        <div>
+          <div class="font-semibold ${up?'text-emerald-300':'text-red-300'}">${h.status}</div>
+          <div class="text-xs text-gray-400 mt-0.5">应用服务</div>
+        </div>
+      </div>
+      <div class="flex items-center gap-3 p-3 rounded-lg" style="background:#12141e;border:1px solid #2d3148">
+        <div class="text-blue-400 font-bold text-xl">${h.activeSessions}</div>
+        <div class="text-sm text-gray-400">内存中活跃会话（含正在对话的）</div>
+      </div>`;
+
+    if (s) {
+      document.getElementById('health-stats').innerHTML = [
+        ['总会话数', s.totalSessions, 'text-white'],
+        ['活跃会话', s.activeSessions, 'text-emerald-400'],
+        ['已关闭会话', s.closedSessions, 'text-gray-400'],
+        ['总对话轮次', s.totalConversations, 'text-white'],
+        ['已完成对话', s.doneConversations, 'text-blue-400'],
+        ['出错对话', s.errorConversations, 'text-red-400'],
+        ['进行中对话', s.runningConversations, 'text-yellow-400'],
+        ['流式事件总数', s.totalEvents, 'text-purple-400'],
+      ].map(([label, val, cls]) => `
+        <div class="flex justify-between py-1.5 border-b border-gray-800">
+          <span class="text-gray-400">${label}</span>
+          <span class="font-mono font-semibold ${cls}">${val ?? '-'}</span>
+        </div>`).join('');
+    }
+  } catch (e) { console.error('health error', e); }
+}
+
+// ====== 强制销毁会话 ======
+async function forceDelete(sessionId) {
+  if (!confirm(`确认销毁会话 ${sessionId.substring(0,8)}… ？\n此操作将清理内存中的 Agent，无法恢复。`)) return;
+  try {
+    const r = await fetch(`${BASE}/api/admin/sessions/${sessionId}`, { method: 'DELETE' });
+    const d = await r.json();
+    alert(d.message);
+    await loadSessions();
+    await loadStats();
+  } catch (e) { alert('操作失败: ' + e.message); }
+}
+
+// ====== 工具函数 ======
+function shortId(id) {
+  if (!id) return '-';
+  return `<span title="${id}">${id.substring(0, 8)}…</span>`;
+}
+function fmtTime(ts) {
+  if (!ts) return '-';
+  try {
+    return new Date(ts).toLocaleString('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  } catch { return ts; }
+}
+function esc(str) {
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ====== 自动刷新 ======
+function setupAutoRefresh() {
+  if (refreshTimer) clearInterval(refreshTimer);
+  if (document.getElementById('auto-refresh').checked) {
+    refreshTimer = setInterval(refreshAll, 30000);
+  }
+}
+document.getElementById('auto-refresh').addEventListener('change', setupAutoRefresh);
+
+// ====== 初始化 ======
+refreshAll().then(setupAutoRefresh);
+</script>
+</body>
+</html>

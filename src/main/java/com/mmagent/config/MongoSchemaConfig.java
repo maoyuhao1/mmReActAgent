@@ -47,8 +47,7 @@ public class MongoSchemaConfig {
         // conversations 复合索引：支撑历史加载查询 findBySessionIdOrderByTurnIndexAsc
         mongoTemplate.indexOps(ConversationDocument.class)
                 .ensureIndex(new CompoundIndexDefinition(
-                        new Document("sessionId", 1).append("turnIndex", 1))
-                        .named("sessionId_turnIndex_idx"))
+                        new Document("sessionId", 1).append("turnIndex", 1)))
                 .subscribe(
                         name -> log.info("[INDEX] conversations 复合索引已确保: {}", name),
                         e -> log.error("[INDEX] 复合索引创建失败", e)
