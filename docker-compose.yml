@@ -1,0 +1,27 @@
+version: '3.8'
+services:
+  mongodb:
+    image: mongo:7.0
+    container_name: mmagent-mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: root123
+      MONGO_INITDB_DATABASE: mmagent_db
+    volumes:
+      - ./data/mongodb:/data/db
+      - ./mongo-init:/docker-entrypoint-initdb.d
+  redis:
+    image: redis:7.2-alpine
+    container_name: mmagent-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - ./data/redis:/data
+networks:
+  default:
+    driver: bridge

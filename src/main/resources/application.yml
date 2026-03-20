@@ -1,0 +1,53 @@
+server:
+  port: 8080
+
+spring:
+  data:
+    mongodb:
+      host: localhost
+      port: 27017
+      database: mmagent_db
+      username: mmagent
+      password: mmagent123
+      authentication-database: mmagent_db
+    redis:
+      host: localhost
+      port: 6379
+      timeout: 2000ms
+      lettuce:
+        pool:
+          max-active: 16
+          max-idle: 8
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      dashscope-agent:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 10
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 30s
+        permitted-number-of-calls-in-half-open-state: 3
+        slow-call-duration-threshold: 30s
+        slow-call-rate-threshold: 80
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  health:
+    circuitbreakers:
+      enabled: true
+
+agent:
+  dashscope:
+    api-key: ${DASHSCOPE_API_KEY:your-api-key-here}
+    model-name: qwen-max
+  react:
+    max-iters: 10
+    sys-prompt: >
+      你是一个智能助手，擅长使用工具解决问题。
+      每次回答时，先分析问题，再决定是否调用工具。
+      如果需要查询时间、计算数学或搜索知识，请主动使用对应工具。
+      最终给出清晰、准确的回答。
