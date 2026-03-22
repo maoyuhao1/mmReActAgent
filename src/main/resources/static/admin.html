@@ -83,6 +83,7 @@
   <button class="tab-btn active px-4 py-2 rounded-t-lg text-sm font-medium" onclick="switchTab('sessions')">会话列表</button>
   <button class="tab-btn px-4 py-2 rounded-t-lg text-sm font-medium" onclick="switchTab('conversations')">对话记录</button>
   <button class="tab-btn px-4 py-2 rounded-t-lg text-sm font-medium" onclick="switchTab('events')">流式事件</button>
+  <button class="tab-btn px-4 py-2 rounded-t-lg text-sm font-medium" onclick="switchTab('tools')">工具列表</button>
   <button class="tab-btn px-4 py-2 rounded-t-lg text-sm font-medium" onclick="switchTab('health')">系统健康</button>
 </div>
 
@@ -220,6 +221,16 @@
     </div>
   </div>
 
+  <!-- Tools Tab -->
+  <div id="tab-tools" class="tab-content hidden fade-in">
+    <div class="flex items-center justify-between mb-4">
+      <span class="text-sm text-gray-400">已注册工具 <span id="tools-count" class="text-gray-500"></span></span>
+    </div>
+    <div id="tools-grid" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div class="text-center text-gray-500 py-8 col-span-2">加载中…</div>
+    </div>
+  </div>
+
   <!-- Health Tab -->
   <div id="tab-health" class="tab-content hidden fade-in">
     <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -251,6 +262,7 @@ function switchTab(name) {
   event.target.classList.add('active');
   if (name === 'conversations' && allConversations.length === 0) loadConversations();
   if (name === 'events' && allEvents.length === 0) loadEvents();
+  if (name === 'tools') loadTools();
   if (name === 'health') loadHealth();
 }
 
@@ -457,6 +469,62 @@ function renderEvents(list) {
       <td class="text-right font-mono text-gray-500">#${e.sequence}</td>
       <td class="text-gray-300 max-w-lg truncate" title="${esc(e.content||'')}">${esc(e.content||'')}</td>
     </tr>`).join('');
+}
+
+// ====== Tools ======
+async function loadTools() {
+  try {
+    const r = await fetch(`${BASE}/api/admin/tools`);
+    const tools = await r.json();
+    document.getElementById('tools-count').textContent = `(${tools.length})`;
+    renderTools(tools);
+  } catch (e) { console.error('tools error', e); }
+}
+
+function renderTools(tools) {
+  const grid = document.getElementById('tools-grid');
+  if (!tools.length) { grid.innerHTML = '<div class="text-center text-gray-500 py-8 col-span-2">暂无工具</div>'; return; }
+  grid.innerHTML = tools.map(t => {
+    const props = (t.parameters && t.parameters.properties) ? t.parameters.properties : {};
+    const required = (t.parameters && t.parameters.required) ? t.parameters.required : [];
+    const paramNames = Object.keys(props);
+    const paramsHtml = paramNames.length ? `
+      <table class="w-full text-xs mt-3" style="border-collapse:collapse">
+        <thead>
+          <tr style="border-bottom:1px solid #2d3148">
+            <th class="text-left py-1.5 pr-3 text-gray-500 font-medium">参数名</th>
+            <th class="text-left py-1.5 pr-3 text-gray-500 font-medium">类型</th>
+            <th class="text-left py-1.5 pr-3 text-gray-500 font-medium">必填</th>
+            <th class="text-left py-1.5 text-gray-500 font-medium">说明</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${paramNames.map(name => {
+            const p = props[name];
+            const isRequired = required.includes(name);
+            return `<tr style="border-bottom:1px solid #1a1d27">
+              <td class="py-1.5 pr-3 mono text-purple-300">${esc(name)}</td>
+              <td class="py-1.5 pr-3 text-yellow-400">${esc(p.type || '-')}</td>
+              <td class="py-1.5 pr-3">${isRequired ? '<span class="badge badge-error">是</span>' : '<span class="text-gray-600">否</span>'}</td>
+              <td class="py-1.5 text-gray-400">${esc(p.description || '')}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>` : '<div class="text-xs text-gray-600 mt-2">无参数</div>';
+
+    return `
+      <div class="card p-4">
+        <div class="flex items-start justify-between gap-2 mb-2">
+          <div class="flex items-center gap-2">
+            <span class="w-2 h-2 rounded-full bg-emerald-400 flex-shrink-0 mt-1"></span>
+            <span class="font-semibold text-white mono">${esc(t.name)}</span>
+          </div>
+          <span class="badge badge-active flex-shrink-0">${paramNames.length} 个参数</span>
+        </div>
+        <p class="text-xs text-gray-400 leading-relaxed">${esc(t.description || '')}</p>
+        ${paramsHtml}
+      </div>`;
+  }).join('');
 }
 
 // ====== Health ======

@@ -6,12 +6,10 @@ import com.mmagent.document.ConversationDocument.ToolCallRecord;
 import com.mmagent.document.StreamEventDocument;
 import com.mmagent.model.SseEvent;
 import io.agentscope.core.ReActAgent;
-import io.agentscope.core.formatter.dashscope.DashScopeChatFormatter;
 import io.agentscope.core.hook.ActingChunkEvent;
 import io.agentscope.core.hook.Hook;
 import io.agentscope.core.hook.HookEvent;
 import io.agentscope.core.hook.PostActingEvent;
-import io.agentscope.core.hook.PostCallEvent;
 import io.agentscope.core.hook.PreActingEvent;
 import io.agentscope.core.hook.ReasoningChunkEvent;
 import io.agentscope.core.memory.InMemoryMemory;
@@ -59,10 +57,8 @@ public class ReactAgentService {
 
     private static final Logger log = LoggerFactory.getLogger(ReactAgentService.class);
 
-    private final ObjectMapper objectMapper = new ObjectMapper();
-
-    /** 每个会话的 Agent 实例（每轮新建，但共享同一个 Memory） */
-    private final Map<String, ReActAgent> sessionAgents = new ConcurrentHashMap<>();
+    // 修复：通过构造函数注入 Spring 托管的 ObjectMapper（含 JSR-310 支持），避免手动 new
+    private final ObjectMapper objectMapper;
 
     /**
      * 每个会话的 InMemoryMemory（跨轮次复用，应用重启后从 MongoDB 恢复）
@@ -73,8 +69,9 @@ public class ReactAgentService {
     /** 每个会话的对话轮次计数（从 MongoDB 中对话数初始化） */
     private final Map<String, AtomicInteger> sessionTurnCounters = new ConcurrentHashMap<>();
 
+    // 修复：replyBuffers 值类型改为 StringBuffer（线程安全），原 StringBuilder 非线程安全
     /** key=conversationId, value=AI 回复缓冲区（每轮重置，用于对话结束后一次性持久化） */
-    private final Map<String, StringBuilder> replyBuffers = new ConcurrentHashMap<>();
+    private final Map<String, StringBuffer> replyBuffers = new ConcurrentHashMap<>();
 
     /** key=sessionId, value=当前进行中对话的 conversationId */
     private final Map<String, String> activeConversations = new ConcurrentHashMap<>();
@@ -85,12 +82,6 @@ public class ReactAgentService {
     /** key=conversationId, value=心跳的 Disposable */
     private final Map<String, Disposable> heartbeatDisposables = new ConcurrentHashMap<>();
 
-    @Value("${agent.dashscope.api-key}")
-    private String apiKey;
-
-    @Value("${agent.dashscope.model-name:qwen-max}")
-    private String modelName;
-
     @Value("${agent.react.max-iters:10}")
     private int maxIters;
 
@@ -98,21 +89,27 @@ public class ReactAgentService {
     private String sysPrompt;
 
     private final Toolkit toolkit;
+    // 修复：注入 Spring 托管的单例 DashScopeChatModel，避免每次请求重新构建
+    private final DashScopeChatModel dashScopeChatModel;
     private final ConversationPersistenceService persistenceService;
     private final RateLimitService rateLimitService;
     private final CircuitBreakerRegistry circuitBreakerRegistry;
     private final TitleGeneratorService titleGeneratorService;
 
     public ReactAgentService(Toolkit toolkit,
+                             DashScopeChatModel dashScopeChatModel,
                              ConversationPersistenceService persistenceService,
                              RateLimitService rateLimitService,
                              CircuitBreakerRegistry circuitBreakerRegistry,
-                             TitleGeneratorService titleGeneratorService) {
+                             TitleGeneratorService titleGeneratorService,
+                             ObjectMapper objectMapper) {
         this.toolkit = toolkit;
+        this.dashScopeChatModel = dashScopeChatModel;
         this.persistenceService = persistenceService;
         this.rateLimitService = rateLimitService;
         this.circuitBreakerRegistry = circuitBreakerRegistry;
         this.titleGeneratorService = titleGeneratorService;
+        this.objectMapper = objectMapper;
     }
 
     /**
@@ -174,16 +171,15 @@ public class ReactAgentService {
                         String conversationId = conversationDoc.getId();
 
                         // 每轮重置回复缓冲区（key 为 conversationId，避免并发请求互覆）
-                        replyBuffers.put(conversationId, new StringBuilder());
+                        replyBuffers.put(conversationId, new StringBuffer());
                         activeConversations.put(sessionId, conversationId);
 
                         // 启动心跳（15s 间隔，防止网关超时断连）
                         Disposable hb = Flux.interval(Duration.ofSeconds(15))
-                                .subscribe(tick -> sink.tryEmitNext(SseEvent.heartbeat(sessionId)));
+                                .subscribe(tick -> emitNext(sink, SseEvent.heartbeat(sessionId)));
                         heartbeatDisposables.put(conversationId, hb);
 
                         ReActAgent agent = buildAgentWithHooks(sessionId, sink, conversationId, memory);
-                        sessionAgents.put(sessionId, agent);
 
                         Msg userMsg = Msg.builder()
                                 .textContent(userMessage)
@@ -191,6 +187,24 @@ public class ReactAgentService {
 
                         // 熔断器包装 agent.call()
                         CircuitBreaker cb = circuitBreakerRegistry.circuitBreaker("dashscope-agent");
+
+                        // 修复：先将占位 Disposable 放入 map，再 subscribe，避免竞态条件
+                        // subscribeOn(boundedElastic) 保证 Agent 在线程池中执行，subscribe() 立即返回，
+                        // 但提前占位使 cancelSession 在任意时刻都能安全获取引用
+                        AtomicReference<Disposable> dispRef = new AtomicReference<>();
+                        activeDisposables.put(conversationId, new Disposable() {
+                            @Override
+                            public void dispose() {
+                                Disposable d = dispRef.get();
+                                if (d != null) d.dispose();
+                            }
+
+                            @Override
+                            public boolean isDisposed() {
+                                Disposable d = dispRef.get();
+                                return d != null && d.isDisposed();
+                            }
+                        });
 
                         Disposable disposable = agent.call(userMsg)
                                 .transformDeferred(CircuitBreakerOperator.of(cb))
@@ -206,13 +220,13 @@ public class ReactAgentService {
                                                 titleGeneratorService.generateAndSave(sessionId, userMessage);
                                             }
                                             stopConversationResources(conversationId, sessionId);
-                                            sink.tryEmitNext(SseEvent.done(sessionId));
+                                            emitNext(sink, SseEvent.done(sessionId));
                                             sink.tryEmitComplete();
                                         },
                                         error -> {
                                             long durationMs = System.currentTimeMillis() - startMs;
                                             if (error instanceof CallNotPermittedException) {
-                                                sink.tryEmitNext(SseEvent.error("服务繁忙，熔断保护中，请稍后重试", sessionId));
+                                                emitNext(sink, SseEvent.error("服务繁忙，熔断保护中，请稍后重试", sessionId));
                                                 persistenceService.failConversation(conversationId, "circuit_breaker_open", 0).subscribe();
                                             } else {
                                                 log.error("Agent 执行异常 [sessionId={}, conversationId={}]",
@@ -227,13 +241,13 @@ public class ReactAgentService {
                                                         .timestamp(Instant.now())
                                                         .sequence(9999)
                                                         .build()).subscribe();
-                                                sink.tryEmitNext(SseEvent.error(error.getMessage(), sessionId));
+                                                emitNext(sink, SseEvent.error(error.getMessage(), sessionId));
                                             }
                                             stopConversationResources(conversationId, sessionId);
                                             sink.tryEmitComplete();
                                         }
                                 );
-                        activeDisposables.put(conversationId, disposable);
+                        dispRef.set(disposable);
 
                         return sink.asFlux()
                                 .map(this::serialize);
@@ -298,8 +312,18 @@ public class ReactAgentService {
     }
 
     private String getAgentReplyBuffer(String conversationId) {
-        StringBuilder buf = replyBuffers.get(conversationId);
+        StringBuffer buf = replyBuffers.get(conversationId);
         return buf != null ? buf.toString() : "";
+    }
+
+    /**
+     * 安全推送 SSE 事件到 Sink，失败时记录 WARN 日志而非静默丢弃
+     */
+    private void emitNext(Sinks.Many<SseEvent> sink, SseEvent event) {
+        Sinks.EmitResult result = sink.tryEmitNext(event);
+        if (result != Sinks.EmitResult.OK) {
+            log.warn("[SINK_EMIT_FAIL] result={} eventType={}", result, event.getType());
+        }
     }
 
     /**
@@ -315,15 +339,7 @@ public class ReactAgentService {
         return ReActAgent.builder()
                 .name("ReActBot-" + sessionId)
                 .sysPrompt(sysPrompt)
-                .model(
-                        DashScopeChatModel.builder()
-                                .apiKey(apiKey)
-                                .modelName(modelName)
-                                .stream(true)
-                                .enableThinking(false)
-                                .formatter(new DashScopeChatFormatter())
-                                .build()
-                )
+                .model(dashScopeChatModel)  // 复用 Spring 单例，避免每轮重新构建
                 .toolkit(toolkit)
                 .memory(memory)  // 复用已有 Memory，保留历史上下文
                 .maxIters(maxIters)
@@ -335,9 +351,9 @@ public class ReactAgentService {
                                     ? e.getIncrementalChunk().getTextContent() : null;
                             if (chunk != null && !chunk.isEmpty()) {
                                 // 使用 conversationId 作 key，避免并发请求互覆
-                                StringBuilder buf = replyBuffers.get(conversationId);
+                                StringBuffer buf = replyBuffers.get(conversationId);
                                 if (buf != null) buf.append(chunk);
-                                sink.tryEmitNext(SseEvent.chunk(chunk, sessionId));
+                                emitNext(sink, SseEvent.chunk(chunk, sessionId));
                             }
                         } else if (event instanceof PreActingEvent e) {
                             String toolName = e.getToolUse().getName();
@@ -348,7 +364,7 @@ public class ReactAgentService {
                             toolCallStart.set(System.currentTimeMillis());
 
                             String toolInfo = String.format("调用工具：%s，参数：%s", toolName, toolArgs);
-                            sink.tryEmitNext(SseEvent.toolCall(toolInfo, sessionId));
+                            emitNext(sink, SseEvent.toolCall(toolInfo, sessionId));
 
                             log.info("[TOOL_CALL] sessionId={} conversationId={} tool={} args={}",
                                     sessionId, conversationId, toolName, toolArgs);
@@ -363,19 +379,15 @@ public class ReactAgentService {
                                     .sequence(eventSeq.getAndIncrement())
                                     .build()).subscribe();
 
-                        } else if (event instanceof ActingChunkEvent e) {
-                            String chunk = e.getChunk() != null
-                                    ? e.getChunk().getOutput().toString() : null;
-                            if (chunk != null && !chunk.isEmpty()) {
-                                sink.tryEmitNext(SseEvent.toolResult(chunk, sessionId));
-                            }
+                        } else if (event instanceof ActingChunkEvent) {
+                            // 工具执行中间 chunk，不推送至前端，避免与 PostActingEvent 重复
                         } else if (event instanceof PostActingEvent e) {
                             long toolDuration = System.currentTimeMillis() - toolCallStart.get();
                             String result = e.getToolResult() != null
                                     ? e.getToolResult().getOutput().toString() : "null";
 
                             String resultMsg = String.format("工具结果：%s", result);
-                            sink.tryEmitNext(SseEvent.toolResult(resultMsg, sessionId));
+                            emitNext(sink, SseEvent.toolResult(resultMsg, sessionId));
 
                             log.info("[TOOL_RESULT] sessionId={} conversationId={} tool={} durationMs={} result={}",
                                     sessionId, conversationId, currentToolName.get(), toolDuration, result);
@@ -418,7 +430,8 @@ public class ReactAgentService {
      * 清理会话（释放资源），并标记 MongoDB 中会话为 closed
      */
     public void removeSession(String sessionId) {
-        sessionAgents.remove(sessionId);
+        // 修复：先终止活跃对话，清理心跳/Disposable/replyBuffer，再释放会话级资源
+        cancelSession(sessionId);
         sessionMemories.remove(sessionId);
         sessionTurnCounters.remove(sessionId);
         persistenceService.closeSession(sessionId).subscribe();

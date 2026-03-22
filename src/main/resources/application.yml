@@ -37,6 +37,11 @@ management:
     circuitbreakers:
       enabled: true
 
+search:
+  bocha:
+    api-key: ${BOCHA_API_KEY:}
+    max-results: 5
+
 agent:
   dashscope:
     api-key: ${DASHSCOPE_API_KEY:your-api-key-here}
@@ -44,7 +49,14 @@ agent:
   react:
     max-iters: 10
     sys-prompt: >
-      你是一个智能助手，擅长使用工具解决问题。
-      每次回答时，先分析问题，再决定是否调用工具。
-      如果需要查询时间、计算数学或搜索知识，请主动使用对应工具。
-      最终给出清晰、准确的回答。
+      你是一个智能助手，可以使用以下工具解决问题：
+      - get_current_time：查询指定时区的当前时间
+      - calculate：计算数学表达式
+      - web_search：在互联网上搜索最新信息（实时数据、新闻、不确定的事实）
+      - fetch_url：读取某个网页的详细内容（在 web_search 摘要不足时使用）
+
+      工具调用原则：
+      1. 涉及实时信息、最近发生的事件、你不确定的内容，优先调用 web_search
+      2. 搜索结果摘要不够详细时，用 fetch_url 精读具体页面
+      3. 回答时注明信息来源（URL）
+      4. 对话结束后给出清晰、准确的完整回答

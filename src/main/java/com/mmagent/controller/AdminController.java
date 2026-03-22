@@ -7,10 +7,14 @@ import com.mmagent.repository.ConversationRepository;
 import com.mmagent.repository.SessionRepository;
 import com.mmagent.repository.StreamEventRepository;
 import com.mmagent.service.ReactAgentService;
+import io.agentscope.core.tool.AgentTool;
+import io.agentscope.core.tool.Toolkit;
 import org.springframework.web.bind.annotation.*;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
+import java.util.Comparator;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -18,6 +22,7 @@ import java.util.Map;
  *
  * <p>接口列表：
  * GET  /api/admin/stats                              - 聚合统计数据
+ * GET  /api/admin/tools                              - 已注册工具列表（名称/描述/参数Schema）
  * GET  /api/admin/sessions                           - 所有会话列表
  * GET  /api/admin/sessions/{sessionId}/conversations - 会话所有对话（含 running/error）
  * GET  /api/admin/conversations/{id}/events          - 某对话的流式事件
@@ -33,15 +38,18 @@ public class AdminController {
     private final ConversationRepository conversationRepo;
     private final StreamEventRepository streamEventRepo;
     private final ReactAgentService agentService;
+    private final Toolkit toolkit;
 
     public AdminController(SessionRepository sessionRepo,
                            ConversationRepository conversationRepo,
                            StreamEventRepository streamEventRepo,
-                           ReactAgentService agentService) {
+                           ReactAgentService agentService,
+                           Toolkit toolkit) {
         this.sessionRepo = sessionRepo;
         this.conversationRepo = conversationRepo;
         this.streamEventRepo = streamEventRepo;
         this.agentService = agentService;
+        this.toolkit = toolkit;
     }
 
     /**
@@ -113,6 +121,25 @@ public class AdminController {
     @GetMapping("/events/recent")
     public Flux<StreamEventDocument> recentEvents() {
         return streamEventRepo.findTop100ByOrderByTimestampDesc();
+    }
+
+    /**
+     * 已注册工具列表（名称、描述、参数 Schema）
+     */
+    @GetMapping("/tools")
+    public Mono<List<Map<String, Object>>> listTools() {
+        List<Map<String, Object>> tools = toolkit.getToolNames().stream()
+                .sorted()
+                .map(name -> {
+                    AgentTool tool = toolkit.getTool(name);
+                    return Map.<String, Object>of(
+                            "name", tool.getName(),
+                            "description", tool.getDescription(),
+                            "parameters", tool.getParameters()
+                    );
+                })
+                .toList();
+        return Mono.just(tools);
     }
 
     /**

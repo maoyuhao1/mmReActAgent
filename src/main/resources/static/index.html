@@ -955,6 +955,13 @@ async function loadHistory(sessionId) {
     addDivider(`历史对话（${convs.length} 轮）`);
     convs.forEach(c => {
       addBubble('user', c.userMessage, true);
+      // 渲染工具调用记录
+      if (c.toolCalls && c.toolCalls.length > 0) {
+        c.toolCalls.forEach(t => {
+          const block = addToolBlock(`调用工具：${t.toolName}，参数：${t.inputArgs || '{}'}`);
+          if (t.result) updateToolBlock(block, `工具结果：${t.result}`);
+        });
+      }
       if (c.aiReply) {
         const bubble = addBubble('assistant', '', true);
         bubble.classList.add('md-content');
@@ -989,7 +996,7 @@ function handleSendOrStop() {
 function addToolBlock(callText) {
   const c = document.getElementById('messages');
   const block = document.createElement('div');
-  block.className = 'tool-block open'; // 默认展开，方便查看工具调用过程
+  block.className = 'tool-block open';
   const header = document.createElement('div');
   header.className = 'tool-block-header';
   header.textContent = '🔧 ' + callText;
