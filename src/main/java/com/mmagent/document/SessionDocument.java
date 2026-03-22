@@ -29,4 +29,10 @@ public class SessionDocument {
 
     /** 累计消息轮次 */
     private int messageCount;
+
+    /** 会话标题（用户自定义，默认为空） */
+    private String title;
+
+    /** 是否收藏（旧文档无此字段时为 null，等同于 false） */
+    private Boolean favorite;
 }

@@ -463,7 +463,7 @@ function renderEvents(list) {
 async function loadHealth() {
   try {
     const [h, s] = await Promise.all([
-      fetch(`${BASE}/api/chat/health`).then(r=>r.json()),
+      fetch(`${BASE}/api/sessions/health`).then(r=>r.json()),
       loadStats()
     ]);
     const up = h.status === 'UP';

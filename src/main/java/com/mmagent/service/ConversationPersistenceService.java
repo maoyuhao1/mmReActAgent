@@ -18,6 +18,7 @@ import reactor.core.publisher.Mono;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -158,6 +159,33 @@ public class ConversationPersistenceService {
      */
     public reactor.core.publisher.Flux<com.mmagent.document.SessionDocument> listSessions() {
         return sessionRepo.findAll();
+    }
+
+    /**
+     * 更新会话标题
+     */
+    public Mono<Void> updateSessionTitle(String sessionId, String title) {
+        return mongoTemplate.updateFirst(
+                Query.query(Criteria.where("_id").is(sessionId)),
+                new Update().set("title", title),
+                SessionDocument.class
+        ).doOnError(e -> log.error("标题更新失败 [sessionId={}]", sessionId, e))
+         .then();
+    }
+
+    /**
+     * 切换收藏状态（读取当前值取反）
+     */
+    public Mono<Map<String, Object>> toggleSessionFavorite(String sessionId) {
+        return sessionRepo.findById(sessionId)
+                .flatMap(doc -> {
+                    boolean newVal = !Boolean.TRUE.equals(doc.getFavorite());
+                    return mongoTemplate.updateFirst(
+                            Query.query(Criteria.where("_id").is(sessionId)),
+                            new Update().set("favorite", newVal),
+                            SessionDocument.class
+                    ).thenReturn(java.util.Map.<String, Object>of("favorite", newVal));
+                });
     }
 
     /**

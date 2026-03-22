@@ -101,15 +101,18 @@ public class ReactAgentService {
     private final ConversationPersistenceService persistenceService;
     private final RateLimitService rateLimitService;
     private final CircuitBreakerRegistry circuitBreakerRegistry;
+    private final TitleGeneratorService titleGeneratorService;
 
     public ReactAgentService(Toolkit toolkit,
                              ConversationPersistenceService persistenceService,
                              RateLimitService rateLimitService,
-                             CircuitBreakerRegistry circuitBreakerRegistry) {
+                             CircuitBreakerRegistry circuitBreakerRegistry,
+                             TitleGeneratorService titleGeneratorService) {
         this.toolkit = toolkit;
         this.persistenceService = persistenceService;
         this.rateLimitService = rateLimitService;
         this.circuitBreakerRegistry = circuitBreakerRegistry;
+        this.titleGeneratorService = titleGeneratorService;
     }
 
     /**
@@ -198,6 +201,10 @@ public class ReactAgentService {
                                             long durationMs = System.currentTimeMillis() - startMs;
                                             persistenceService.completeConversation(conversationId, aiReply, durationMs).subscribe();
                                             persistenceService.touchSession(sessionId).subscribe();
+                                            // 第一轮对话结束后异步生成标题
+                                            if (turnIndex == 0) {
+                                                titleGeneratorService.generateAndSave(sessionId, userMessage);
+                                            }
                                             stopConversationResources(conversationId, sessionId);
                                             sink.tryEmitNext(SseEvent.done(sessionId));
                                             sink.tryEmitComplete();
