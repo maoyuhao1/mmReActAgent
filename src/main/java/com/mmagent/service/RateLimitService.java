@@ -1,39 +1,42 @@
 package com.mmagent.service;
 
-import org.springframework.data.redis.core.ReactiveRedisTemplate;
+import org.redisson.api.RLockReactive;
+import org.redisson.api.RedissonReactiveClient;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
 
-import java.time.Duration;
+import java.util.concurrent.TimeUnit;
 
 /**
- * 基于 Redis 的会话并发控制服务
+ * 基于 Redisson 的会话并发控制服务
  *
- * <p>使用 SETNX 实现同一 session 在同一时刻只允许一个进行中的对话请求。
+ * <p>使用 Redisson 可重入锁保证同一 session 同一时刻只有一个进行中的对话请求。
+ * waitTime=0 表示立即失败（等同于 SETNX 语义），leaseTime=300s 防止异常时锁永不释放。
  */
 @Service
 public class RateLimitService {
 
-    private final ReactiveRedisTemplate<String, String> redisTemplate;
+    private final RedissonReactiveClient redissonReactive;
 
-    public RateLimitService(ReactiveRedisTemplate<String, String> redisTemplate) {
-        this.redisTemplate = redisTemplate;
+    public RateLimitService(RedissonReactiveClient redissonReactive) {
+        this.redissonReactive = redissonReactive;
     }
 
     /**
-     * 尝试获取 session 锁（SETNX，TTL=300s）
+     * 尝试获取 session 锁（不等待，TTL=300s）
      *
      * @return true=获取成功，false=已被占用
      */
     public Mono<Boolean> tryAcquireSessionLock(String sessionId) {
-        return redisTemplate.opsForValue()
-                .setIfAbsent("session:lock:" + sessionId, "1", Duration.ofSeconds(300));
+        RLockReactive lock = redissonReactive.getLock("session:lock:" + sessionId);
+        return lock.tryLock(0, 300, TimeUnit.SECONDS);
     }
 
     /**
-     * 释放 session 锁
+     * 释放 session 锁（强制释放，无论持有者）
      */
     public Mono<Void> releaseSessionLock(String sessionId) {
-        return redisTemplate.delete("session:lock:" + sessionId).then();
+        RLockReactive lock = redissonReactive.getLock("session:lock:" + sessionId);
+        return lock.forceUnlock().then();
     }
 }
