@@ -28,6 +28,24 @@
         </encoder>
     </appender>
 
+    <!-- 模型请求日志独立文件（含完整入参 JSON，便于调试推理过程） -->
+    <appender name="MODEL_REQUEST_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>logs/model-request.log</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+            <fileNamePattern>logs/model-request.%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+            <timeBasedFileNamingAndTriggeringPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedFNATP">
+                <maxFileSize>50MB</maxFileSize>
+            </timeBasedFileNamingAndTriggeringPolicy>
+            <maxHistory>7</maxHistory>
+            <totalSizeCap>500MB</totalSizeCap>
+        </rollingPolicy>
+        <encoder>
+            <!-- %X{sessionId} 和 %X{conversationId} 来自 MDC，打印在每行前缀 -->
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [sid:%X{sessionId}] [cid:%X{conversationId}] - %msg%n</pattern>
+            <charset>UTF-8</charset>
+        </encoder>
+    </appender>
+
     <!-- ERROR 单独写文件 -->
     <appender name="ERROR_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
         <file>logs/error.log</file>
@@ -47,8 +65,13 @@
         </encoder>
     </appender>
 
-    <!-- 项目包：DEBUG 级别 -->
-    <logger name="com.mmagent" level="DEBUG"/>
+    <!-- 项目包：INFO 级别（业务日志） -->
+    <logger name="com.mmagent" level="INFO"/>
+
+    <!-- 模型请求专用 logger：additivity=false 不再写入 app.log/console，只写独立文件 -->
+    <logger name="model-request" level="DEBUG" additivity="false">
+        <appender-ref ref="MODEL_REQUEST_FILE"/>
+    </logger>
 
     <!-- AgentScope 框架：INFO 级别，避免过多噪音 -->
     <logger name="io.agentscope" level="INFO"/>

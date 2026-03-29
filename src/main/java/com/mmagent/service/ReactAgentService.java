@@ -2,6 +2,7 @@ package com.mmagent.service;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.mmagent.document.ConversationDocument;
 import com.mmagent.document.ConversationDocument.ToolCallRecord;
 import com.mmagent.document.StreamEventDocument;
 import com.mmagent.model.SseEvent;
@@ -11,11 +12,18 @@ import io.agentscope.core.hook.Hook;
 import io.agentscope.core.hook.HookEvent;
 import io.agentscope.core.hook.PostActingEvent;
 import io.agentscope.core.hook.PreActingEvent;
+import io.agentscope.core.hook.PreReasoningEvent;
 import io.agentscope.core.hook.ReasoningChunkEvent;
-import io.agentscope.core.memory.InMemoryMemory;
+import io.agentscope.core.memory.autocontext.AutoContextConfig;
+import io.agentscope.core.memory.autocontext.AutoContextMemory;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.MsgRole;
+import io.agentscope.core.message.TextBlock;
+import io.agentscope.core.message.ToolResultBlock;
+import io.agentscope.core.message.ToolUseBlock;
 import io.agentscope.core.model.DashScopeChatModel;
+import io.agentscope.core.session.Session;
+import io.agentscope.core.state.SimpleSessionKey;
 import io.agentscope.core.tool.Toolkit;
 import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
@@ -23,6 +31,7 @@ import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import io.github.resilience4j.reactor.circuitbreaker.operator.CircuitBreakerOperator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import reactor.core.Disposable;
@@ -56,15 +65,17 @@ import java.util.concurrent.atomic.AtomicReference;
 public class ReactAgentService {
 
     private static final Logger log = LoggerFactory.getLogger(ReactAgentService.class);
+    /** 专用模型请求日志，写入 logs/model-request.log，格式含 sessionId */
+    private static final Logger modelReqLog = LoggerFactory.getLogger("model-request");
 
     // 修复：通过构造函数注入 Spring 托管的 ObjectMapper（含 JSR-310 支持），避免手动 new
     private final ObjectMapper objectMapper;
 
     /**
-     * 每个会话的 InMemoryMemory（跨轮次复用，应用重启后从 MongoDB 恢复）
+     * 每个会话的 AutoContextMemory（跨轮次复用，含自动压缩；应用重启后从 Redis 恢复）
      * key: sessionId
      */
-    private final Map<String, InMemoryMemory> sessionMemories = new ConcurrentHashMap<>();
+    private final Map<String, AutoContextMemory> sessionMemories = new ConcurrentHashMap<>();
 
     /** 每个会话的对话轮次计数（从 MongoDB 中对话数初始化） */
     private final Map<String, AtomicInteger> sessionTurnCounters = new ConcurrentHashMap<>();
@@ -95,6 +106,10 @@ public class ReactAgentService {
     private final RateLimitService rateLimitService;
     private final CircuitBreakerRegistry circuitBreakerRegistry;
     private final TitleGeneratorService titleGeneratorService;
+    /** AgentScope Session：使用 MongoSession 持久化 AutoContextMemory（含压缩后消息） */
+    private final Session agentSession;
+    /** 上下文压缩配置（消息数阈值、token 阈值等） */
+    private final AutoContextConfig autoContextConfig;
 
     public ReactAgentService(Toolkit toolkit,
                              DashScopeChatModel dashScopeChatModel,
@@ -102,7 +117,9 @@ public class ReactAgentService {
                              RateLimitService rateLimitService,
                              CircuitBreakerRegistry circuitBreakerRegistry,
                              TitleGeneratorService titleGeneratorService,
-                             ObjectMapper objectMapper) {
+                             ObjectMapper objectMapper,
+                             Session agentSession,
+                             AutoContextConfig autoContextConfig) {
         this.toolkit = toolkit;
         this.dashScopeChatModel = dashScopeChatModel;
         this.persistenceService = persistenceService;
@@ -110,6 +127,8 @@ public class ReactAgentService {
         this.circuitBreakerRegistry = circuitBreakerRegistry;
         this.titleGeneratorService = titleGeneratorService;
         this.objectMapper = objectMapper;
+        this.agentSession = agentSession;
+        this.autoContextConfig = autoContextConfig;
     }
 
     /**
@@ -142,11 +161,11 @@ public class ReactAgentService {
      * 实际对话逻辑（从 MongoDB 恢复历史 → 创建对话记录 → 启动心跳 → Agent 执行）
      */
     private Flux<String> doChat(String sessionId, String userMessage) {
-        Mono<InMemoryMemory> memoryMono;
+        Mono<AutoContextMemory> memoryMono;
         if (sessionMemories.containsKey(sessionId)) {
             memoryMono = Mono.just(sessionMemories.get(sessionId));
         } else {
-            memoryMono = loadHistoryFromMongo(sessionId);
+            memoryMono = loadMemory(sessionId);
         }
 
         long startMs = System.currentTimeMillis();
@@ -215,6 +234,8 @@ public class ReactAgentService {
                                             long durationMs = System.currentTimeMillis() - startMs;
                                             persistenceService.completeConversation(conversationId, aiReply, durationMs).subscribe();
                                             persistenceService.touchSession(sessionId).subscribe();
+                                            // 将完整 Memory（含工具调用 Msg 块）持久化到 Redis（AgentScope Session）
+                                            saveMemoryToSession(sessionId, memory);
                                             // 第一轮对话结束后异步生成标题
                                             if (turnIndex == 0) {
                                                 titleGeneratorService.generateAndSave(sessionId, userMessage);
@@ -282,11 +303,43 @@ public class ReactAgentService {
     }
 
     /**
-     * 从 MongoDB 加载历史对话并还原到 InMemoryMemory
-     * 仅加载 status=done 的轮次（已完整完成的对话）
+     * 加载会话内存：优先从 Redis（AgentScope Session）恢复 AutoContextMemory；
+     * Redis 无数据或消息为空时 fallback 到 MongoDB 纯文本历史重建。
      */
-    private Mono<InMemoryMemory> loadHistoryFromMongo(String sessionId) {
-        InMemoryMemory memory = new InMemoryMemory();
+    private Mono<AutoContextMemory> loadMemory(String sessionId) {
+        return Mono.fromCallable(() -> {
+            AutoContextMemory memory = new AutoContextMemory(autoContextConfig, dashScopeChatModel);
+            // loadIfExists 返回 true 但 workingMessages 可能为空（旧 InMemoryMemory key 遗留）
+            if (memory.loadIfExists(agentSession, sessionId) && !memory.getMessages().isEmpty()) {
+                log.info("[MEMORY_RESTORED_MONGO] sessionId={} 已从 MongoDB 恢复 {} 条消息（含压缩历史）",
+                        sessionId, memory.getMessages().size());
+                return memory;
+            }
+            return null; // null → empty Mono → 触发 fallback
+        }).subscribeOn(Schedulers.boundedElastic())
+        .switchIfEmpty(Mono.defer(() -> loadHistoryFromMongo(sessionId)));
+    }
+
+    /**
+     * 将 AutoContextMemory 持久化到 MongoDB（同时保存 workingMessages 和 originalMessages）。
+     * 在 boundedElastic 异步执行，不阻塞 SSE 流。
+     */
+    private void saveMemoryToSession(String sessionId, AutoContextMemory memory) {
+        Mono.fromRunnable(() -> {
+            memory.saveTo(agentSession, sessionId);
+            log.debug("[MEMORY_SAVED_MONGO] sessionId={} Memory 已持久化，working={} original={}",
+                    sessionId, memory.getMessages().size(), memory.getOriginalMemoryMsgs().size());
+        }).subscribeOn(Schedulers.boundedElastic())
+        .subscribe(null, e -> log.error("[MEMORY_SAVE_FAIL] sessionId={} Memory 持久化失败", sessionId, e));
+    }
+
+    /**
+     * Fallback：从 MongoDB 加载历史对话并还原到 AutoContextMemory。
+     * 每轮按 USER → (ASSISTANT tool_use + TOOL tool_result)* → ASSISTANT 顺序重建消息链。
+     * 仅在 Redis 中不存在有效会话数据时触发。
+     */
+    private Mono<AutoContextMemory> loadHistoryFromMongo(String sessionId) {
+        AutoContextMemory memory = new AutoContextMemory(autoContextConfig, dashScopeChatModel);
         return persistenceService.getConversationHistory(sessionId)
                 .doOnNext(conv -> {
                     if (conv.getUserMessage() != null) {
@@ -294,6 +347,31 @@ public class ReactAgentService {
                                 .role(MsgRole.USER)
                                 .textContent(conv.getUserMessage())
                                 .build());
+                    }
+                    // 恢复工具调用消息块
+                    if (conv.getToolCalls() != null) {
+                        for (ConversationDocument.ToolCallRecord tc : conv.getToolCalls()) {
+                            String toolCallId = UUID.randomUUID().toString();
+                            // ASSISTANT: tool_use block
+                            ToolUseBlock toolUseBlock = ToolUseBlock.builder()
+                                    .id(toolCallId)
+                                    .name(tc.getToolName())
+                                    .input(parseInputArgs(tc.getInputArgs()))
+                                    .build();
+                            memory.addMessage(Msg.builder()
+                                    .role(MsgRole.ASSISTANT)
+                                    .content(toolUseBlock)
+                                    .build());
+                            // TOOL: tool_result block
+                            String resultText = tc.getResult() != null ? tc.getResult() : "";
+                            ToolResultBlock toolResultBlock = ToolResultBlock.of(
+                                    toolCallId, tc.getToolName(),
+                                    TextBlock.builder().text(resultText).build());
+                            memory.addMessage(Msg.builder()
+                                    .role(MsgRole.TOOL)
+                                    .content(toolResultBlock)
+                                    .build());
+                        }
                     }
                     if (conv.getAiReply() != null) {
                         memory.addMessage(Msg.builder()
@@ -303,12 +381,26 @@ public class ReactAgentService {
                     }
                 })
                 .then(Mono.fromCallable(() -> {
-                    int turns = memory.getMessages().size() / 2;
-                    if (turns > 0) {
-                        log.info("[HISTORY_RESTORED] sessionId={} 已从 MongoDB 恢复 {} 轮历史对话", sessionId, turns);
+                    if (!memory.getMessages().isEmpty()) {
+                        log.info("[MEMORY_RESTORED_MONGO] sessionId={} 已从 MongoDB 恢复 {} 条消息（含工具调用块，fallback）",
+                                sessionId, memory.getMessages().size());
                     }
                     return memory;
                 }));
+    }
+
+    /**
+     * 将工具调用参数 JSON 字符串解析为 Map，解析失败时降级为 raw 字符串包装。
+     */
+    @SuppressWarnings("unchecked")
+    private java.util.Map<String, Object> parseInputArgs(String inputArgs) {
+        if (inputArgs == null || inputArgs.isBlank()) return java.util.Map.of();
+        try {
+            return objectMapper.readValue(inputArgs, java.util.Map.class);
+        } catch (Exception e) {
+            log.warn("[TOOL_ARGS_PARSE_FAIL] 工具参数解析失败，降级为 raw 包装: {}", inputArgs);
+            return java.util.Map.of("raw", inputArgs);
+        }
     }
 
     private String getAgentReplyBuffer(String conversationId) {
@@ -327,10 +419,10 @@ public class ReactAgentService {
     }
 
     /**
-     * 构建携带流式 Hook 的 Agent，使用传入的 Memory 实例
+     * 构建携带流式 Hook 的 Agent，使用传入的 AutoContextMemory 实例
      */
     private ReActAgent buildAgentWithHooks(String sessionId, Sinks.Many<SseEvent> sink,
-                                           String conversationId, InMemoryMemory memory) {
+                                           String conversationId, AutoContextMemory memory) {
         AtomicInteger eventSeq = new AtomicInteger(0);
         AtomicLong toolCallStart = new AtomicLong(0);
         AtomicReference<String> currentToolName = new AtomicReference<>("");
@@ -346,7 +438,41 @@ public class ReactAgentService {
                 .hook(new Hook() {
                     @Override
                     public <T extends HookEvent> Mono<T> onEvent(T event) {
-                        if (event instanceof ReasoningChunkEvent e) {
+                        if (event instanceof PreReasoningEvent e) {
+                            // 1. 压缩检查：超过阈值时压缩 workingMemoryStorage
+                            boolean compressed = memory.compressIfNeeded();
+                            if (compressed) {
+                                log.info("[MEMORY_COMPRESSED] sessionId={} 触发上下文压缩，压缩后消息数={}",
+                                        sessionId, memory.getMessages().size());
+                            }
+                            // 2. 用压缩后的消息更新本轮推理输入（保留 system prompt）
+                            java.util.List<Msg> newInputMessages = new java.util.ArrayList<>();
+                            java.util.List<Msg> original = e.getInputMessages();
+                            if (!original.isEmpty() && original.get(0).getRole() == MsgRole.SYSTEM) {
+                                newInputMessages.add(original.get(0));
+                            }
+                            newInputMessages.addAll(memory.getMessages());
+                            e.setInputMessages(newInputMessages);
+                            // 3. 记录实际发送给模型的消息（压缩后）
+                            if (modelReqLog.isDebugEnabled()) {
+                                MDC.put("sessionId", sessionId);
+                                MDC.put("conversationId", conversationId);
+                                try {
+                                    String messagesJson = objectMapper.writerWithDefaultPrettyPrinter()
+                                            .writeValueAsString(e.getInputMessages());
+                                    modelReqLog.debug("model={} msgCount={} compressed={}\n{}",
+                                            e.getModelName(),
+                                            e.getInputMessages().size(),
+                                            compressed,
+                                            messagesJson);
+                                } catch (JsonProcessingException ex) {
+                                    modelReqLog.debug("序列化消息失败", ex);
+                                } finally {
+                                    MDC.remove("sessionId");
+                                    MDC.remove("conversationId");
+                                }
+                            }
+                        } else if (event instanceof ReasoningChunkEvent e) {
                             String chunk = e.getIncrementalChunk() != null
                                     ? e.getIncrementalChunk().getTextContent() : null;
                             if (chunk != null && !chunk.isEmpty()) {
@@ -420,14 +546,14 @@ public class ReactAgentService {
      */
     public String createSession() {
         String sessionId = UUID.randomUUID().toString();
-        // 预初始化空 Memory，避免第一次调用时触发无效的历史加载
-        sessionMemories.put(sessionId, new InMemoryMemory());
+        // 预初始化空 AutoContextMemory，避免第一次调用时触发无效的历史加载
+        sessionMemories.put(sessionId, new AutoContextMemory(autoContextConfig, dashScopeChatModel));
         persistenceService.createSession(sessionId).subscribe();
         return sessionId;
     }
 
     /**
-     * 清理会话（释放资源），并标记 MongoDB 中会话为 closed
+     * 清理会话（释放资源），并标记 MongoDB 中会话为 closed，同时删除 Redis 中的 AgentScope Session
      */
     public void removeSession(String sessionId) {
         // 修复：先终止活跃对话，清理心跳/Disposable/replyBuffer，再释放会话级资源
@@ -435,6 +561,10 @@ public class ReactAgentService {
         sessionMemories.remove(sessionId);
         sessionTurnCounters.remove(sessionId);
         persistenceService.closeSession(sessionId).subscribe();
+        // 删除 Redis 中的 AgentScope Session 持久化数据
+        Mono.fromRunnable(() -> agentSession.delete(SimpleSessionKey.of(sessionId)))
+                .subscribeOn(Schedulers.boundedElastic())
+                .subscribe(null, e -> log.warn("[SESSION_DELETE_FAIL] sessionId={}", sessionId, e));
         log.info("会话已清理：{}", sessionId);
     }
 

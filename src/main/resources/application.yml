@@ -60,3 +60,8 @@ agent:
       2. 搜索结果摘要不够详细时，用 fetch_url 精读具体页面
       3. 回答时注明信息来源（URL）
       4. 对话结束后给出清晰、准确的完整回答
+  memory:
+    msg-threshold: 60        # 消息数超过此值触发压缩
+    max-token: 28000         # qwen-max 可用上下文上限
+    token-ratio: 0.75        # token 使用率超 75% 触发压缩
+    last-keep: 20            # 最近 N 条消息不参与压缩
